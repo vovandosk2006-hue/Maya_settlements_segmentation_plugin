@@ -1,0 +1,13 @@
+torch
+torchvision
+pyyaml
+pillow
+tqdm
+matplotlib
+numpy
+segmentation-models-pytorch
+pandas
+openpyxl
+xlsxwriter
+pytest
+rasterio
