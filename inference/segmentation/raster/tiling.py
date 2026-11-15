@@ -8,7 +8,7 @@ def generate_windows(width, height, tile_size = 512, overlap = 64):
         raise ValueError("tile_size must be positive")
 
     if overlap < 0 or overlap >= tile_size:
-        raise ValueError("overlap must be >= 0 и < tile_size") 
+        raise ValueError("Overlap must be >= 0 and < tile_size") 
 
     step = tile_size - overlap
 

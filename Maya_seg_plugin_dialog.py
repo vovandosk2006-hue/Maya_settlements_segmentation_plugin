@@ -25,7 +25,10 @@
 import os
 
 from qgis.PyQt import uic
-from qgis.PyQt import QtWidgets
+from qgis.PyQt.QtWidgets import QDialog, QFileDialog, QMessageBox
+from qgis.core import QgsProject, QgsRasterLayer
+from .inference.inference import predict_image, load_model, write_mask
+from .inference.segmentation.raster.writer import write_mask
 
 # This loads your .ui file so that PyQt can populate your plugin with the elements from Qt Designer
 FORM_CLASS, _ = uic.loadUiType(
@@ -36,7 +39,7 @@ FORM_CLASS, _ = uic.loadUiType(
     import_from='Maya_seg_plugin')
 
 
-class MayaSegPluginDialog(QtWidgets.QDialog, FORM_CLASS):
+class MayaSegPluginDialog(QDialog, FORM_CLASS):
     def __init__(self, parent=None):
         """Constructor."""
         super(MayaSegPluginDialog, self).__init__(parent)
@@ -46,3 +49,64 @@ class MayaSegPluginDialog(QtWidgets.QDialog, FORM_CLASS):
         # http://qt-project.org/doc/qt-4.8/designer-using-a-ui-file.html
         # #widgets-and-dialogs-with-auto-connect
         self.setupUi(self)
+        
+        self.load_raster_layers()
+
+        self.OutputDirectoryToolButton.clicked.connect(self.select_output) # tool button
+        
+        # predict image, write wask
+        self.runInferenceButton.clicked.connect(self.run_inference) # button box
+
+    def load_raster_layers(self):
+        self.InputRastercomboBox.clear()
+            
+        for layer in QgsProject.instance().mapLayers().values():
+            
+            if isinstance(layer, QgsRasterLayer):
+                self.InputRastercomboBox.addItem(layer.name(), layer.id())
+    
+    def select_output(self):
+        path = QFileDialog.getExistingDirectory(self, "Select output directory")
+        
+        if path:
+            self.OutputDirectoryLine.setText(path)
+    
+    def run_inference(self):
+        raster_id = self.InputRastercomboBox.currentData()
+        tile_size = self.tileSizeSpinBox.value()
+        overlap = self.overlapSpinBox.value()
+        threshold = (self.thresholdSpinBox.value() / 100)
+        output_path = self.OutputDirectoryLine.text()
+
+        if not raster_id:
+            QMessageBox.warning(self, "Warning", "Select input raster!")
+            return
+        if not os.path.isdir(output_path):
+            QMessageBox.warning(self, "Warning", "Select output directory!")
+            return
+        if tile_size == 0:
+            QMessageBox.warning(self, "Tile size must be > 0")
+            return
+        if overlap >= tile_size:
+            QMessageBox.warning(self, "Warning", "Overlap must be >= 0 and < tile_size!")
+            return
+        
+
+        self.runInferenceButton.setEnabled(False)
+
+        try:
+            raster = QgsProject.instance().mapLayer(raster_id)
+
+            PLUGIN_DIR = os.path.dirname(os.path.abspath(__file__))
+            model_path = os.path.join(PLUGIN_DIR, 'inference', 'checkpoints', 'best_model.pt')
+
+            model = load_model(model_path)
+
+            final_mask = predict_image(model, raster.source(), threshold, tile_size, overlap)
+            write_mask(output_path + "/mask_1.tif", final_mask, raster.source())
+            
+        except Exception as e:
+            QMessageBox.critical(self, "Inference error", str(e))
+
+        finally:
+            self.runInferenceButton.setEnabled(True)

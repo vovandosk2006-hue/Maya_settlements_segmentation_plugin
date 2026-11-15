@@ -8,10 +8,10 @@ def get_raster_info(path):
 
         # check pixel resolution
         x, y = raster.res
-        expected_res = 1
-        tolerance = 0.05 
-        if (abs(x - expected_res) > tolerance or abs(y - expected_res) > tolerance) or x != y:
-            raise ValueError(f"Wrong pixel resolution: {x:.4f} x {y:.4f} m/pixel. Expected approximately 1 x 1 m/pixel (tolerance ±{tolerance:.2f} m).")
+        # expected_res = 1
+        # tolerance = 0.75
+        # if (abs(x - expected_res) > tolerance or abs(y - expected_res) > tolerance) or x != y:
+        #     raise ValueError(f"Wrong pixel resolution: {x:.4f} x {y:.4f} m/pixel. Expected approximately 1 x 1 m/pixel (tolerance ±{tolerance:.2f} m).")
 
         return {
             "path": str(path),
