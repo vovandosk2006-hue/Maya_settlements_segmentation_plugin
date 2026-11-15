@@ -103,7 +103,22 @@ class MayaSegPluginDialog(QDialog, FORM_CLASS):
             model = load_model(model_path)
 
             final_mask = predict_image(model, raster.source(), threshold, tile_size, overlap)
-            write_mask(output_path + "/mask_1.tif", final_mask, raster.source())
+            i = 1
+            while True:
+                if os.path.isfile(output_path + f"/mask_{i}.tif"):
+                    i = i + 1
+                    continue
+                write_mask(output_path + f"/mask_{i}.tif", final_mask, raster.source())
+                break
+            
+            mask_path = output_path + f"/mask_{i}.tif"
+            mask_layer = QgsRasterLayer(mask_path, f"Mask {i}", "gdal")
+            if mask_layer.isValid():
+                QgsProject.instance().addMapLayer(mask_layer)
+            else:
+                QMessageBox.warning(self, "Warning", "Error loading raster mask!")
+
+            QMessageBox.information(self, "Success", "Raster mask successfully created!")    
             
         except Exception as e:
             QMessageBox.critical(self, "Inference error", str(e))
