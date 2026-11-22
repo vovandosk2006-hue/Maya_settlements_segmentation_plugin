@@ -26,9 +26,20 @@ import os
 
 from qgis.PyQt import uic
 from qgis.PyQt.QtWidgets import QDialog, QFileDialog, QMessageBox
-from qgis.core import QgsProject, QgsRasterLayer
+from qgis.core import (
+    QgsProject,
+    QgsRasterLayer,
+    QgsRectangle,
+    QgsGeometry,
+    QgsWkbTypes,
+    QgsCoordinateTransform
+)
 from .inference.inference import predict_image, load_model, write_mask
-from .inference.segmentation.raster.writer import write_mask
+# from .inference.segmentation.raster.writer import write_mask
+from qgis.PyQt.QtCore import Qt
+from qgis.PyQt.QtGui import QColor, QIcon
+from osgeo import gdal
+from qgis.gui import QgsMapTool, QgsRubberBand
 
 # This loads your .ui file so that PyQt can populate your plugin with the elements from Qt Designer
 FORM_CLASS, _ = uic.loadUiType(
@@ -39,8 +50,60 @@ FORM_CLASS, _ = uic.loadUiType(
     import_from='Maya_seg_plugin')
 
 
+class RectangleMapTool(QgsMapTool):
+    def __init__(self, canvas, callback):
+        super().__init__(canvas)
+
+        self.canvas = canvas
+        self.callback = callback
+        self.start_point = None
+
+        self.rubber_band = QgsRubberBand(canvas, QgsWkbTypes.PolygonGeometry)
+
+        self.rubber_band.setColor(QColor(255, 0, 0))
+        self.rubber_band.setFillColor(QColor(255, 0, 0, 40))
+        self.rubber_band.setWidth(2)
+
+    def canvasPressEvent(self, event):
+        if event.button() == Qt.LeftButton:
+            self.start_point = self.toMapCoordinates(event.pos())
+
+    def canvasMoveEvent(self, event):
+        if self.start_point is None:
+            return
+        
+        current_point = self.toMapCoordinates(event.pos())
+
+        rect = QgsRectangle(self.start_point, current_point)
+
+        geometry = QgsGeometry.fromRect(rect)
+
+        self.rubber_band.setToGeometry(geometry, None)
+
+    def canvasReleaseEvent(self, event):
+        if event.button() != Qt.LeftButton:
+            return
+        
+        if self.start_point is None:
+            return
+        
+        end_point = self.toMapCoordinates(event.pos())
+
+        rect = QgsRectangle(self.start_point, end_point)
+
+        geometry = QgsGeometry.fromRect(rect)
+
+        self.rubber_band.reset(QgsWkbTypes.PolygonGeometry)
+
+        self.start_point = None
+
+        if rect.width() <= 0 or rect.height() <= 0:
+            return
+
+        self.callback(geometry)
+
 class MayaSegPluginDialog(QDialog, FORM_CLASS):
-    def __init__(self, parent=None):
+    def __init__(self, iface, parent=None):
         """Constructor."""
         super(MayaSegPluginDialog, self).__init__(parent)
         # Set up the user interface from Designer through FORM_CLASS.
@@ -48,28 +111,142 @@ class MayaSegPluginDialog(QDialog, FORM_CLASS):
         # self.<objectname>, and you can use autoconnect slots - see
         # http://qt-project.org/doc/qt-4.8/designer-using-a-ui-file.html
         # #widgets-and-dialogs-with-auto-connect
-        self.setupUi(self)
         
-        self.load_raster_layers()
+        self.setupUi(self)
+
+        self.iface = iface
+
+        self.rectangle_tool = None
+        self.selected_geometry = None
+        
+        project = QgsProject.instance()
+
+        project.layersAdded.connect(self.load_raster_layers)
+        project.layersRemoved.connect(self.load_raster_layers)
+
+        self.selectAreapushButton.setIcon(QIcon(':/images/themes/default/mActionEditCut.svg'))
+
+        self.selectAreapushButton.clicked.connect(self.select_raster_area)
 
         self.OutputDirectoryToolButton.clicked.connect(self.select_output) # tool button
         
         # predict image, write wask
         self.runInferenceButton.clicked.connect(self.run_inference) # button box
 
-    def load_raster_layers(self):
+    def load_raster_layers(self, *args):
+        
+        current_id = self.InputRastercomboBox.currentData()
         self.InputRastercomboBox.clear()
             
         for layer in QgsProject.instance().mapLayers().values():
             
             if isinstance(layer, QgsRasterLayer):
                 self.InputRastercomboBox.addItem(layer.name(), layer.id())
+        
+        index = self.InputRastercomboBox.findData(current_id)
+        
+        if index >= 0:
+            self.InputRastercomboBox.setCurrentIndex(index)
     
     def select_output(self):
         path = QFileDialog.getExistingDirectory(self, "Select output directory")
         
         if path:
             self.OutputDirectoryLine.setText(path)
+    
+    def select_raster_area(self):
+        raster_id = self.InputRastercomboBox.currentData()
+        if not raster_id:
+            QMessageBox.warning(self, "Warning", "Select input raster!")
+            return
+        raster = QgsProject.instance().mapLayer(raster_id)
+        if not raster or not raster.isValid():
+            QMessageBox.warning(self, "Warning","Invalid raster layer!")
+            return
+        
+        # Hide dialog window
+        self.hide()
+
+        # Activate rectangle tool
+        self.rectangle_tool = RectangleMapTool(self.iface.mapCanvas(), self.on_area_selected)
+
+        self.iface.mapCanvas().setMapTool(self.rectangle_tool)
+    
+    def on_area_selected(self, geometry):
+        self.selected_geometry = geometry
+        
+        # Returning to dialog window
+        self.show()
+        self.raise_()
+        self.activateWindow()
+        
+        self.create_raster_fragment()
+    
+    def create_raster_fragment(self):
+        raster_id = self.InputRastercomboBox.currentData()
+        
+        raster = QgsProject.instance().mapLayer(raster_id)
+        
+        if not raster or not raster.isValid():
+            return
+        
+        output_dir = self.OutputDirectoryLine.text()
+        
+        if not os.path.isdir(output_dir):
+            QMessageBox.warning(self, "Warning", "Select output directory first!")
+            return
+        
+        try:
+            # Преобразуем геометрию в CRS исходного растра
+            geometry = QgsGeometry(self.selected_geometry)
+            transform = QgsCoordinateTransform(self.iface.mapCanvas().mapSettings().destinationCrs(), raster.crs(), QgsProject.instance())
+            geometry.transform(transform)
+            
+            # Создаём уникальное имя файла
+            i = 1
+            while True:
+                output_path = os.path.join(output_dir, f"selected_area_{i}.tif")
+                
+                if not os.path.exists(output_path):
+                    break
+                i += 1
+                
+            # Обрезаем исходный растр
+            result = gdal.Warp(
+                output_path,
+                raster.source(),
+                format="GTiff",
+                cutlineWKT=geometry.asWkt(),
+                cutlineSRS=raster.crs().toWkt(),
+                cropToCutline=True,
+                creationOptions=["COMPRESS=LZW", "TILED=YES"]
+                )
+            
+            if result is None:
+                raise Exception("GDAL failed to crop raster!")
+            
+            result = None
+            
+            # Загружаем новый растр в QGIS
+            new_layer = QgsRasterLayer(output_path, f"Selected area {i}", "gdal")
+            
+            if not new_layer.isValid():
+                raise Exception("Cannot load created raster!")
+            
+            QgsProject.instance().addMapLayer(new_layer)
+            
+            # Обновляем список растров
+            self.load_raster_layers()
+            
+            index = self.InputRastercomboBox.findData(new_layer.id())
+            
+            if index >= 0:
+                self.InputRastercomboBox.setCurrentIndex(index)
+                
+            QMessageBox.information(self, "Success", "Raster fragment successfully created!")
+            
+        except Exception as e:
+            QMessageBox.critical(self, "Cropping error", str(e))
     
     def run_inference(self):
         raster_id = self.InputRastercomboBox.currentData()
@@ -85,7 +262,7 @@ class MayaSegPluginDialog(QDialog, FORM_CLASS):
             QMessageBox.warning(self, "Warning", "Select output directory!")
             return
         if tile_size == 0:
-            QMessageBox.warning(self, "Tile size must be > 0")
+            QMessageBox.warning(self, "Warning", "Tile size must be > 0")
             return
         if overlap >= tile_size:
             QMessageBox.warning(self, "Warning", "Overlap must be >= 0 and < tile_size!")

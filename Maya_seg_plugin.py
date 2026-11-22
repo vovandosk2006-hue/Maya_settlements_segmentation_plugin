@@ -186,7 +186,7 @@ class MayaSegPlugin:
         # Only create GUI ONCE in callback, so that it will only load when the plugin is started
         if self.first_start == True:
             self.first_start = False
-            self.dlg = MayaSegPluginDialog()
+            self.dlg = MayaSegPluginDialog(self.iface)
 
         # show the dialog
         self.dlg.show()
